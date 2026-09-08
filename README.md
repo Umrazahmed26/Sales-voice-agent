@@ -11,7 +11,6 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 uvicorn app.main:app --reload
 ```
-
 For PostgreSQL, set `DATABASE_URL` in `.env`:
 
 ```env
@@ -63,7 +62,6 @@ curl -X POST http://127.0.0.1:8000/leads \
     "callback_requested_at": "2026-09-02T10:30:00+05:30"
   }'
 ```
-
 ### Fetch One Lead
 
 ```bash
@@ -80,6 +78,22 @@ curl -X POST http://127.0.0.1:8000/calls/dispatch \
   -d '{
     "phone_number": "15551234567"
   }'
+```
+
+### Get Call
+
+Returns a Call by its internal UUID:
+
+```bash
+curl http://127.0.0.1:8000/calls/00000000-0000-0000-0000-000000000000
+```
+
+### List Calls For Lead
+
+Returns calls for a lead phone number, newest started call first:
+
+```bash
+curl http://127.0.0.1:8000/leads/15551234567/calls
 ```
 
 ### Classify Lead From Webhook
@@ -128,3 +142,4 @@ curl -X PATCH http://127.0.0.1:8000/leads/15551234567 \
     "timeline": "next two weeks"
   }'
 ```
+

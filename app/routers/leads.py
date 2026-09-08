@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Lead, LeadClassification, LeadStatus
-from app.schemas import LeadCreate, LeadRead, LeadUpdate
+from app.models import Call, Lead, LeadClassification, LeadStatus
+from app.schemas import CallRead, LeadCreate, LeadRead, LeadUpdate
 
 
 router = APIRouter(prefix="/leads", tags=["leads"])
@@ -15,6 +17,13 @@ router = APIRouter(prefix="/leads", tags=["leads"])
 
 def _lead_by_phone(db: Session, phone_number: str) -> Lead | None:
     return db.scalar(select(Lead).where(Lead.phone_number == phone_number))
+
+
+def _lead_by_identifier(db: Session, identifier: str) -> Lead | None:
+    try:
+        return db.get(Lead, UUID(identifier))
+    except ValueError:
+        return _lead_by_phone(db, identifier)
 
 
 def get_or_create_lead(db: Session, payload: LeadCreate) -> tuple[Lead, bool]:
@@ -47,9 +56,20 @@ def create_lead(payload: LeadCreate, response: Response, db: Session = Depends(g
     return lead
 
 
-@router.get("/{phone_number}", response_model=LeadRead)
-def get_lead(phone_number: str, db: Session = Depends(get_db)):
-    lead = _lead_by_phone(db, phone_number)
+@router.get("/{phone_number}/calls", response_model=list[CallRead])
+def list_lead_calls(phone_number: str, db: Session = Depends(get_db)):
+    query = (
+        select(Call)
+        .join(Lead, Call.lead_id == Lead.id)
+        .where(Lead.phone_number == phone_number)
+        .order_by(Call.started_at.desc())
+    )
+    return list(db.scalars(query).all())
+
+
+@router.get("/{identifier}", response_model=LeadRead)
+def get_lead(identifier: str, db: Session = Depends(get_db)):
+    lead = _lead_by_identifier(db, identifier)
     if lead is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
     return lead
@@ -72,9 +92,9 @@ def list_leads(
     return list(db.scalars(query).all())
 
 
-@router.patch("/{phone_number}", response_model=LeadRead)
-def update_lead(phone_number: str, payload: LeadUpdate, db: Session = Depends(get_db)):
-    lead = _lead_by_phone(db, phone_number)
+@router.patch("/{identifier}", response_model=LeadRead)
+def update_lead(identifier: str, payload: LeadUpdate, db: Session = Depends(get_db)):
+    lead = _lead_by_identifier(db, identifier)
     if lead is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
 

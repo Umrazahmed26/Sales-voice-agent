@@ -70,9 +70,32 @@ class CallDispatchRequest(BaseModel):
     phone_number: str = Field(..., min_length=1, max_length=64)
 
 
+class CallRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    lead_id: UUID
+    omnidim_call_id: str
+    phone_number: str
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+    duration_seconds: int | None
+    transcript: str | None
+    summary: str | None
+    sentiment: str | None
+    classification: str | None
+    objections: str | None
+    next_action: str | None
+    recording_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CallDispatchResponse(BaseModel):
     lead: LeadRead
-    omnidim_call_id: int
+    call: CallRead
+    omnidim_call_id: int | str
 
 
 class WebhookClassifyRequest(BaseModel):
@@ -83,7 +106,7 @@ class WebhookClassifyRequest(BaseModel):
     products: str | None = None
     timeline: str | None = None
     features: str | None = None
-    classification: LeadClassification | None = None
+    classification: str | None = None
 
 
 class WebhookWhatsappRequest(BaseModel):
@@ -95,3 +118,17 @@ class WebhookWhatsappRequest(BaseModel):
 class WebhookWhatsappResponse(BaseModel):
     lead: LeadRead
     whatsapp_status: str | dict[str, Any]
+
+
+class WebhookScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    phone_number: str = Field(..., min_length=1, max_length=64)
+    requested_time_phrase: str = Field(..., min_length=1, max_length=500)
+
+
+class WebhookScheduleResponse(BaseModel):
+    lead: LeadRead
+    resolved_datetime: datetime
+    calendar_event_link: str | None
+    confirmation_sent: bool

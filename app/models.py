@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum as SQLAlchemyEnum, String, Text, false, func
+from sqlalchemy import Boolean, Column, DateTime, Enum as SQLAlchemyEnum, ForeignKey, Integer, String, Text, false, func
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.types import CHAR, TypeDecorator
 
@@ -88,3 +88,25 @@ class Lead(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class Call(Base):
+    __tablename__ = "calls"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    lead_id = Column(GUID(), ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)
+    omnidim_call_id = Column(String(128), nullable=False, unique=True, index=True)
+    phone_number = Column(String(64), nullable=False, index=True)
+    status = Column(String(64), nullable=False, default="initiated")
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    transcript = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    sentiment = Column(String(64), nullable=True)
+    classification = Column(String(32), nullable=True)
+    objections = Column(Text, nullable=True)
+    next_action = Column(String(255), nullable=True)
+    recording_url = Column(String(1024), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
