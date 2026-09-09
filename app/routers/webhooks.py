@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Lead, LeadClassification, LeadStatus
+from app.models import Call, Lead, LeadClassification, LeadStatus
 from app.schemas import (
     LeadRead,
     WebhookClassifyRequest,
@@ -258,61 +258,99 @@ def _env_value(name: str) -> str | None:
     return value.strip().strip('"').strip("'").strip()
 
 
+def _clean_optional_value(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    invalid_values = {
+        "",
+        "dont know",
+        "don't know",
+        "do not know",
+        "not sure",
+        "unknown",
+        "none",
+        "n/a",
+        "na",
+        "not decided",
+        "no idea"
+    }
+
+    if value.lower() in invalid_values:
+        return None
+
+    return value
+
+
 def _fallback_message_body(
-    lead: Lead,
+    call: Call | None,
     sender_phone_number: str,
     followup_link_url: str | None,
 ) -> str:
-    details = []
+    if call is None or not any(
+        value for value in (call.budget, call.products, call.timeline, call.features, call.classification)
+    ):
+        message = _generic_followup_message()
+        return f"{message}\n{followup_link_url}" if followup_link_url else message
 
-    if lead.budget:
-        details.append(f"a budget around {lead.budget}")
-    if lead.timeline:
-        details.append(f"a timeline of {lead.timeline}")
-    if lead.products:
-        details.append(lead.products)
-    if lead.features:
-        details.append(f"with {lead.features}")
+    details = []
+    if call.budget:
+        details.append(f"a budget around {call.budget}")
+    if call.timeline:
+        details.append(f"a timeline of {call.timeline}")
+    if call.products:
+        details.append(call.products)
+    if call.features:
+        details.append(f"with {call.features}")
+    if call.classification:
+        details.append(f"a {call.classification} opportunity")
 
     summary = ", ".join(details) if details else "the solution we discussed"
-
     message = (
-        f"Hi, I wanted to follow up on {summary}. "
-        "I have attached my resume for reference. "
+        f"Thanks for sharing. I can help with {summary}. "
+        "I have attached my resume and a quick overview for reference. "
         f"You can reach me directly at {sender_phone_number}."
     )
     return f"{message}\n{followup_link_url}" if followup_link_url else message
 
 
 def _message_body(
-    lead: Lead,
+    call: Call | None,
     sender_phone_number: str,
     followup_link_url: str | None,
 ) -> str:
-    fallback = _fallback_message_body(lead, sender_phone_number, followup_link_url)
+    fallback = _fallback_message_body(call, sender_phone_number, followup_link_url)
+    if call is None or not any(
+        value for value in (call.budget, call.products, call.timeline, call.features, call.classification)
+    ):
+        return fallback
+
     api_key = _env_value("GROQ_API_KEY")
     if not api_key:
         print("Groq message generation failed: missing GROQ_API_KEY configuration")
         return fallback
 
-    lead_context = ", ".join(
+    call_context = ", ".join(
         value
         for value in (
-            f"budget: {lead.budget}" if lead.budget else None,
-            f"products: {lead.products}" if lead.products else None,
-            f"timeline: {lead.timeline}" if lead.timeline else None,
-            f"features: {lead.features}" if lead.features else None,
+            f"budget: {call.budget}" if call.budget else None,
+            f"products: {call.products}" if call.products else None,
+            f"timeline: {call.timeline}" if call.timeline else None,
+            f"features: {call.features}" if call.features else None,
+            f"classification: {call.classification}" if call.classification else None,
         )
         if value
     ) or "No additional details were recorded."
     prompt = (
         "Write a short (2-3 sentences, under 40 words) natural WhatsApp follow-up message "
         "to a lead. "
-        "Use the lead details naturally rather than dumping fields or sounding like a template. "
+        "Use the current call's qualification details naturally rather than dumping fields or sounding like a template. "
         "Mention that the resume, a build overview, and a link are attached below, "
         "and include the sender's phone number. "
         "Return only the message text, with no quotation marks or explanation.\n\n"
-        f"Lead details: {lead_context}\n"
+        f"Current call details: {call_context}\n"
         f"Sender phone number: {sender_phone_number}"
     )
 
@@ -444,6 +482,19 @@ def _lead_payload(lead: Lead) -> dict[str, Any]:
     return LeadRead.model_validate(lead).model_dump(mode="json")
 
 
+def _current_active_call(db: Session, phone_number: str) -> Call | None:
+    return db.scalar(
+        select(Call)
+        .where(Call.phone_number == phone_number)
+        .where(Call.status.in_(["initiated", "in_call"]))
+        .order_by(Call.started_at.desc(), Call.created_at.desc())
+    )
+
+
+def _generic_followup_message() -> str:
+    return "Thanks for your time — happy to share more when you're ready."
+
+
 def _whatsapp_error_response(lead: Lead, whatsapp_status: dict[str, Any]) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_502_BAD_GATEWAY,
@@ -455,33 +506,152 @@ def _whatsapp_error_response(lead: Lead, whatsapp_status: dict[str, Any]) -> JSO
         ),
     )
 
-
 @router.post("/classify", response_model=LeadRead)
-def classify_lead(payload: WebhookClassifyRequest, db: Session = Depends(get_db)):
-    payload.phone_number = _normalize_webhook_phone_number(payload.phone_number)
-    if payload.classification is not None:
-        payload.classification = _normalize_classification(payload.classification)
-    lead = _require_lead(db, payload.phone_number)
-    update_data = payload.model_dump(
-        exclude={"phone_number"}, exclude_none=True, exclude_unset=True
+def classify_lead(
+    payload: WebhookClassifyRequest,
+    db: Session = Depends(get_db)
+):
+    # Normalize phone number
+    payload.phone_number = _normalize_webhook_phone_number(
+        payload.phone_number
     )
 
-    for field_name, value in update_data.items():
-        if field_name == "classification":
-            value = LeadClassification(value)
-        setattr(lead, field_name, value)
+    # Normalize classification
+    if payload.classification is not None:
+        payload.classification = _normalize_classification(
+            payload.classification
+        )
 
-    _append_transcript_line(lead, payload)
+    # Find lead
+    lead = _require_lead(db, payload.phone_number)
+
+    # Find current active call
+    call = _current_active_call(
+        db,
+        payload.phone_number
+    )
+
+    # Fallback to most recent call
+    if call is None:
+        call = db.scalar(
+            select(Call)
+            .where(Call.phone_number == payload.phone_number)
+            .order_by(
+                Call.started_at.desc(),
+                Call.created_at.desc()
+            )
+        )
+
+    if call is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active call found for this phone number"
+        )
+
+    # ---------------------------------------------------------
+    # CURRENT CALL = CURRENT QUALIFICATION SNAPSHOT
+    # ---------------------------------------------------------
+
+    call.classification = (
+        payload.classification
+        if payload.classification is not None
+        else None
+    )
+
+    call.products = _clean_optional_value(
+        payload.products
+    )
+
+    call.budget = _clean_optional_value(
+        payload.budget
+    )
+
+    call.timeline = _clean_optional_value(
+        payload.timeline
+    )
+
+    call.features = _clean_optional_value(
+        payload.features
+    )
+
+    call.status = "in_call"
+
+    # ---------------------------------------------------------
+    # SYNC LEAD WITH CURRENT CALL
+    # ---------------------------------------------------------
+
+    lead.classification = (
+        LeadClassification(call.classification)
+        if call.classification is not None
+        else None
+    )
+
+    lead.products = call.products
+    lead.budget = call.budget
+    lead.timeline = call.timeline
+    lead.features = call.features
+
+    # ---------------------------------------------------------
+    # SAVE TRANSCRIPT EVENT
+    # ---------------------------------------------------------
+
+    _append_transcript_line(
+        lead,
+        payload
+    )
+
     db.commit()
+
+    db.refresh(call)
     db.refresh(lead)
 
     return lead
+
+
+# @router.post("/classify", response_model=LeadRead)
+# def classify_lead(payload: WebhookClassifyRequest, db: Session = Depends(get_db)):
+#     payload.phone_number = _normalize_webhook_phone_number(payload.phone_number)
+#     if payload.classification is not None:
+#         payload.classification = _normalize_classification(payload.classification)
+#     lead = _require_lead(db, payload.phone_number)
+
+#     call = _current_active_call(db, payload.phone_number)
+#     if call is None:
+#         call = db.scalar(
+#             select(Call)
+#             .where(Call.phone_number == payload.phone_number)
+#             .order_by(Call.started_at.desc(), Call.created_at.desc())
+#         )
+#     if call is None:
+#         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active call found for this phone number")
+
+#     update_data = payload.model_dump(
+#         exclude={"phone_number"}, exclude_none=True, exclude_unset=True
+#     )
+
+#     for field_name, value in update_data.items():
+#         if field_name == "classification":
+#             value = _normalize_classification(value)
+#             setattr(call, field_name, value)
+#             lead.classification = LeadClassification(value)
+#         else:
+#             setattr(call, field_name, value)
+#             setattr(lead, field_name, value)
+
+#     call.status = "in_call"
+#     _append_transcript_line(lead, payload)
+#     db.commit()
+#     db.refresh(call)
+#     db.refresh(lead)
+
+#     return lead
 
 
 @router.post("/whatsapp", response_model=WebhookWhatsappResponse)
 def send_whatsapp(payload: WebhookWhatsappRequest, db: Session = Depends(get_db)):
     payload.phone_number = _normalize_webhook_phone_number(payload.phone_number)
     lead = _require_lead(db, payload.phone_number)
+    call = _current_active_call(db, payload.phone_number)
     (
         unipile_dsn,
         unipile_api_key,
@@ -491,7 +661,7 @@ def send_whatsapp(payload: WebhookWhatsappRequest, db: Session = Depends(get_db)
         build_image_file_path,
         followup_link_url,
     ) = _whatsapp_config()
-    message = _message_body(lead, sender_phone_number, followup_link_url)
+    message = _message_body(call, sender_phone_number, followup_link_url)
     try:
         _send_unipile_message(
             unipile_dsn,

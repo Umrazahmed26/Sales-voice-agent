@@ -85,6 +85,10 @@ class CallRead(BaseModel):
     summary: str | None
     sentiment: str | None
     classification: str | None
+    budget: str | None
+    products: str | None
+    timeline: str | None
+    features: str | None
     objections: str | None
     next_action: str | None
     recording_url: str | None
